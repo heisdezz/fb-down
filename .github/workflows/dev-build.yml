@@ -1,0 +1,78 @@
+name: Android Dev Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+
+concurrency:
+  group: dev-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build dev-client APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # ---- JS dependency caching ----
+      - name: Cache Bun store & node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ---- Cache the generated native android/ folder from prebuild ----
+      # Keyed on the inputs that affect prebuild output, so unchanged config
+      # skips a full regenerate.
+      - name: Cache prebuild output
+        uses: actions/cache@v4
+        with:
+          path: android
+          key: ${{ runner.os }}-prebuild-${{ hashFiles('app.json', 'app.config.*', 'package.json', 'bun.lock') }}
+
+      - name: Prebuild (Android)
+        run: bunx expo prebuild --platform android --no-install
+
+      # ---- Gradle caching (deps + build cache + wrapper) ----
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: android
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Assemble debug (dev-client) APK
+        working-directory: android
+        run: ./gradlew assembleDebug --build-cache
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: fb-down-dev-${{ github.sha }}
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
